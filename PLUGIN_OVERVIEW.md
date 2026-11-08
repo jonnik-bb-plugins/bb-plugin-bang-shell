@@ -4,6 +4,9 @@
   multi-line script, and send it with **Mod+Alt+Enter** or **Send menu → Run
   in terminal**. It runs in the thread's working directory, on the machine
   where that thread's session runs.
+- Highlight a command in an agent's answer and pick **Run in terminal** in the
+  selection menu, next to Add to chat. The message action button runs the
+  answer's first shell code block. Your unfinished draft is kept.
 - The message waits in the queue while the command runs. It then goes to the
   agent as two blocks, the command and its output (with the exit code when it
   is not zero), so the next answer starts from the real result.

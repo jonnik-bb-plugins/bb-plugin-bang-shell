@@ -19,6 +19,7 @@
   "include": [
     "server.ts",
     "app.tsx",
+    "command-text.ts",
     "test"
   ]
 }

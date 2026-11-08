@@ -12,6 +12,13 @@ terminal**. The leading `!` is optional with these actions: `!git status` and
 `git status` both run `git status`. Pressing plain Enter on a message that
 starts with `!` is refused with a hint, so nothing runs by accident.
 
+To run text from an agent's answer, highlight it and pick **Run in terminal** in
+the selection menu, next to Add to chat. The same action sits in each message's
+action bar; without a selection it runs the message's first shell code block
+(`sh`, `bash`, `console`, … or unlabelled; `$ ` prompts are dropped). It sends
+the text through the thread's composer like Mod+Alt+Enter, then puts back
+whatever you were typing.
+
 The message waits in the queue (card "Running: …") while the command runs, then
 goes to the agent as two blocks:
 
