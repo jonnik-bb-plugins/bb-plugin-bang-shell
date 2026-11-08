@@ -51,6 +51,7 @@ bb plugin reload bang-shell   # settings are read at load
 | `terminalCols`     | `120`   | 20–500    | Terminal width                                                          |
 | `terminalRows`     | `32`    | 5–200     | Terminal height                                                         |
 | `titleMaxChars`    | `60`    | 1–200     | Terminal tab title length                                               |
+| `disablePager`     | `true`  |           | Run with `PAGER=cat GIT_PAGER=cat` so `git log` and `man` do not wait in a pager |
 
 Out-of-range numbers are clamped; non-numbers and invalid prefixes fall back to
 the default.

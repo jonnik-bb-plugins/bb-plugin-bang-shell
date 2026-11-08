@@ -50,11 +50,13 @@ const ROW_CLOCK_SKEW_MS = 5000;
 /** The authorized row is queued right after the hook pass; later rows are other messages. */
 const ROW_BIND_WINDOW_MS = 30_000;
 
+/** Prepended to every command so `git log`, `man` and friends print instead of waiting in a pager. */
+export const NO_PAGER_PREFIX = "export PAGER=cat GIT_PAGER=cat; ";
 
-// CSI/OSC escape sequences and stray control characters from the PTY stream.
+// CSI and OSC sequences, then any other escape sequence (`ESC =`, `ESC (B`, …).
 const ANSI_PATTERN =
   // eslint-disable-next-line no-control-regex
-  /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
+  /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[ -/]*[0-~]/g;
 
 /**
  * A usable prefix: 1–4 characters, no whitespace, and not starting with a
@@ -265,6 +267,12 @@ export default async function plugin(bb: BbPluginApi) {
     },
     terminalCols: { type: "number", label: "Terminal columns", description: "20–500.", default: DEFAULTS.terminalCols },
     terminalRows: { type: "number", label: "Terminal rows", description: "5–200.", default: DEFAULTS.terminalRows },
+    disablePager: {
+      type: "boolean",
+      label: "Turn off pagers",
+      description: "Run commands with PAGER=cat and GIT_PAGER=cat so git log, git diff and man print their output instead of waiting in less.",
+      default: true,
+    },
     titleMaxChars: {
       type: "number",
       label: "Terminal title length",
@@ -287,6 +295,7 @@ export default async function plugin(bb: BbPluginApi) {
     terminalCols: num("terminalCols"),
     terminalRows: num("terminalRows"),
     titleMaxChars: num("titleMaxChars"),
+    disablePager: raw.disablePager !== false,
   };
   // Raw PTY text kept while waiting: enough for the tail once escape codes are stripped.
   const rawBufferChars = config.outputTailChars * 4 + 4096;
@@ -355,7 +364,7 @@ export default async function plugin(bb: BbPluginApi) {
         cols: config.terminalCols,
         rows: config.terminalRows,
         title: job.terminalTitle,
-        start: { mode: "command", command: job.command },
+        start: { mode: "command", command: (config.disablePager ? NO_PAGER_PREFIX : "") + job.command },
       });
       job.terminalId = terminal.id;
       job.terminalTitle = terminal.title;

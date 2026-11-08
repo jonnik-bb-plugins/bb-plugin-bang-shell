@@ -18,7 +18,7 @@ export default definePluginApp((app) => {
       {
         id: "run-in-terminal",
         label: "Run in terminal",
-        icon: "SquareTerminal",
+        icon: "Terminal",
         description: "Run the message as a shell command in this thread's environment and send its output",
         disabled: (composer) => composer.isEmpty || composer.isSubmittingBlocked,
         run: ({ composer }) => runInTerminal(composer),

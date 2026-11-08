@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-bang-shell",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "engines": {
     "bb": ">=0.49",
@@ -10,7 +10,7 @@
     "name": "Bang Shell",
     "description": "Run a message as a shell command on the host where the thread's session runs (Mod+Shift+Enter) and send the command and its output to the agent.",
     "branding": {
-      "icon": "SquareTerminal"
+      "icon": "Terminal"
     },
     "server": "./server.ts",
     "app": "./app.tsx"

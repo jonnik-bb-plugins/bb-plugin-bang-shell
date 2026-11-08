@@ -7,6 +7,7 @@ import plugin, {
   formatShellMessage,
   isOwnSubmission,
   MAX_COMMAND_CHARS,
+  NO_PAGER_PREFIX,
   messageText,
   normalizePrefix,
   parseBangCommand,
@@ -48,6 +49,8 @@ test("appendBounded keeps only the tail", () => {
 
 test("cleanTerminalOutput strips escapes and control characters", () => {
   assert.equal(cleanTerminalOutput("\u001b[32mok\u001b[0m\r\nline2\r\n\u001b]0;t\u0007"), "ok\nline2");
+  // `less` keypad mode switches and charset selection, as seen from `git log` in a PTY.
+  assert.equal(cleanTerminalOutput("\u001b=a5017cf Add\r\n\u001b(B\u001b[m\u001b>add.ts"), "a5017cf Add\nadd.ts");
 });
 
 test("isOwnSubmission requires this plugin and the exact marker", () => {
@@ -171,7 +174,7 @@ function core(settings: Record<string, unknown> = {}, kvDelayMs = 0) {
     sdk: {
       terminals: {
         create: async (args: { start: { command: string }; title: string }) => {
-          created.push(args.start.command);
+          created.push(args.start.command.startsWith(NO_PAGER_PREFIX) ? args.start.command.slice(NO_PAGER_PREFIX.length) : `RAW:${args.start.command}`);
           return { id: `term-${created.length}`, title: args.title };
         },
         output: async () => {
@@ -704,4 +707,17 @@ test("a re-ask racing the binding of a row another plugin holds waits too", asyn
   assert.equal((await raced).action, "wait");
   await c.drive(row, () => c.sent.length === 1);
   assert.match(c.sent[0], /```output\nout\n```/);
+});
+
+test("commands run with pagers turned off unless the setting is off", async () => {
+  const on = core({ pollIntervalMs: 50 });
+  await on.load();
+  const a = await on.send("git log", OWN);
+  await on.drive(a.row!, () => on.sent.length === 1);
+  assert.deepEqual(on.created, ["git log"]);
+  const off = core({ pollIntervalMs: 50, disablePager: false });
+  await off.load();
+  const b = await off.send("git log", OWN);
+  await off.drive(b.row!, () => off.sent.length === 1);
+  assert.deepEqual(off.created, ["RAW:git log"]);
 });
