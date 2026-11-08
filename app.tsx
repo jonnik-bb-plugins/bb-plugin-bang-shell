@@ -28,7 +28,7 @@ export default definePluginApp((app) => {
   app.composer.experimental_registerCommand({
     id: "run-in-terminal",
     title: "Bang Shell: run message in terminal",
-    defaultShortcut: { key: "Enter", mod: true, shift: true },
+    defaultShortcut: { key: "Enter", mod: true, alt: true },
     run: ({ composer }) => runInTerminal(composer),
   });
 });

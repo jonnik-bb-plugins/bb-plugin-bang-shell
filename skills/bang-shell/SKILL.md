@@ -6,7 +6,7 @@ description: Explains the Bang Shell plugin — the user can run a shell command
 # Bang Shell
 
 The user can send a message with the composer's **Run in terminal** action
-(Mod+Shift+Enter). The plugin runs it as a shell command in a terminal of this
+(Mod+Alt+Enter). The plugin runs it as a shell command in a terminal of this
 thread's environment, then delivers it to you as:
 
     ```sh

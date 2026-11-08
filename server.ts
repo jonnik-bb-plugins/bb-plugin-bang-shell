@@ -237,7 +237,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Only run commands sent with the Run in terminal action",
       description:
-        "On: plain Enter never runs a command; use Mod+Shift+Enter or Send menu → Run in terminal. Off (legacy): any message starting with the prefix runs, including ones an agent sends with `bb thread tell`. See README, Security.",
+        "On: plain Enter never runs a command; use Mod+Alt+Enter or Send menu → Run in terminal. Off (legacy): any message starting with the prefix runs, including ones an agent sends with `bb thread tell`. See README, Security.",
       default: true,
     },
     prefix: {
@@ -575,7 +575,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (config.requireRunAction) {
         return {
           action: "reject",
-          message: `To run "${config.prefix}…" as a command, send it with Mod+Shift+Enter or Send menu → Run in terminal.`,
+          message: `To run "${config.prefix}…" as a command, send it with Mod+Alt+Enter or Send menu → Run in terminal.`,
         };
       }
       command = prefixed;

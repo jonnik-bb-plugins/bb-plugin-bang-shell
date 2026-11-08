@@ -7,7 +7,7 @@ See [PLUGIN_OVERVIEW.md](PLUGIN_OVERVIEW.md).
 ## Usage
 
 Type the command in a thread's composer, then send it with
-**Mod+Shift+Enter** (rebindable in keyboard settings) or **Send menu → Run in
+**Mod+Alt+Enter** (rebindable in keyboard settings) or **Send menu → Run in
 terminal**. The leading `!` is optional with these actions: `!git status` and
 `git status` both run `git status`. Pressing plain Enter on a message that
 starts with `!` is refused with a hint, so nothing runs by accident.
