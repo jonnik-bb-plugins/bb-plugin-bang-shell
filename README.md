@@ -4,6 +4,18 @@ Run a message as a shell command in the thread's environment, on the host where
 the session runs, and send the command and its output to the agent.
 See [PLUGIN_OVERVIEW.md](PLUGIN_OVERVIEW.md).
 
+## Why
+
+Keep the agent away from secrets and production access without losing its
+help. When the agent's sandbox or permission mode blocks a command — it needs
+credentials from `.env`, a database or cluster the agent must not reach, or a
+tool that runs as you — the agent proposes the command, you read it and run it
+with one click, and the agent continues from the output. The agent never gets
+the credentials or the access, only the result you chose to run.
+
+Commands run as typed, so keep secrets out of what they print: the output goes
+to the agent and its provider.
+
 ## Usage
 
 Type the command in a thread's composer, then send it with

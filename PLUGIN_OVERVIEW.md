@@ -1,3 +1,13 @@
+## Why
+
+Keep agents away from secrets and production access without losing their help.
+When an agent's sandbox or permission mode blocks a command — it needs
+credentials from `.env`, a database the agent must not reach, or a tool that
+runs as you — the agent proposes the command, you review it and run it with one
+click, and the agent continues from the output. It never gets the credentials
+or the access, only the result you chose to run. Keep secret values out of
+what the command prints: the output goes to the agent.
+
 ## What you get
 
 - Type a command in a thread's composer, such as `git status`, `!ls -la` or a
