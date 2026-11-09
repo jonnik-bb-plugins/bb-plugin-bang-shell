@@ -18,10 +18,8 @@ async function runInTerminal(composer: PluginComposerApi): Promise<void> {
  * same trust path as Mod+Alt+Enter: a human click in the bb window.
  */
 async function runText(composer: PluginComposerApi, command: string): Promise<void> {
-  if (composer.isSubmittingBlocked) {
-    toast.error(composer.submittingBlockedReason ?? "The composer cannot send right now.");
-    return;
-  }
+  // No isSubmittingBlocked pre-check: an empty draft counts as blocked
+  // ("Type a message first."), and submit reports any real block itself.
   const saved = composer.draft;
   composer.replace({ text: command, mentions: [], attachments: [] });
   try {

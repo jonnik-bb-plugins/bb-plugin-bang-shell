@@ -721,3 +721,12 @@ test("commands run with pagers turned off unless the setting is off", async () =
   await off.drive(b.row!, () => off.sent.length === 1);
   assert.deepEqual(off.created, ["RAW:git log"]);
 });
+
+test("markdown wrapped around a sent command is stripped before it runs", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const { row } = await c.send("> `echo quoted`", OWN);
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.deepEqual(c.created, ["echo quoted"]);
+  assert.match(c.sent[0], /^```sh\necho quoted\n```/);
+});

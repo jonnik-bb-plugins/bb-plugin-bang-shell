@@ -29,3 +29,34 @@ export function pickCommand(selectedText: string | undefined, messageText: strin
   const block = firstShellBlock(messageText)?.trim();
   return block ? block : null;
 }
+
+/**
+ * Strips markdown that bb's "Add to chat" (or a copy from a rendered message)
+ * wraps around a command: blockquote markers, a fenced block, one inline code
+ * span, and `$ ` prompts. Plain shell text comes back unchanged.
+ */
+export function normalizeCommand(text: string): string {
+  let current = text.trim();
+  for (let pass = 0; pass < 4; pass += 1) {
+    const next = unwrapOnce(current);
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+function unwrapOnce(text: string): string {
+  const lines = text.split("\n");
+  const nonEmpty = lines.filter((line) => line.trim() !== "");
+  if (nonEmpty.length > 0 && nonEmpty.every((line) => /^\s*>/.test(line))) {
+    return lines.map((line) => line.replace(/^\s*> ?/, "")).join("\n").trim();
+  }
+  const fenced = /^(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n?\1[`~]*$/.exec(text);
+  if (fenced) return fenced[2].trim();
+  const inline = /^(`+)([^`][\s\S]*?)\1$/.exec(text);
+  if (inline && !inline[2].includes(inline[1])) return inline[2].trim();
+  if (nonEmpty.length > 0 && nonEmpty.every((line) => /^\s*\$ /.test(line))) {
+    return lines.map((line) => line.replace(/^\s*\$ /, "")).join("\n").trim();
+  }
+  return text;
+}

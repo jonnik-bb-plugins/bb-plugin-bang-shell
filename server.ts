@@ -7,6 +7,7 @@ import type {
   MessageDispatchHookContext,
   MessageDispatchHookDecision,
 } from "@get-bb/plugin-sdk";
+import { normalizeCommand } from "./command-text.ts";
 
 type ThreadQueuedMessage = MessageDispatchHookContext["queuedMessages"][number];
 
@@ -583,6 +584,7 @@ export default async function plugin(bb: BbPluginApi) {
       return PROCEED;
     }
 
+    command = normalizeCommand(command);
     if (command === "") return { action: "reject", message: `Nothing to run. Example: ${config.prefix}ls -la` };
     if (command.length > MAX_COMMAND_CHARS) {
       return {

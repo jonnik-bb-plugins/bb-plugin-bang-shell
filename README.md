@@ -19,6 +19,12 @@ action bar; without a selection it runs the message's first shell code block
 the text through the thread's composer like Mod+Alt+Enter, then puts back
 whatever you were typing.
 
+Markdown wrapped around a command is removed before it runs, so text that
+**Add to chat** inserts (`` `cmd` ``, `> `cmd` ``) or a pasted fenced block runs
+as the bare command. The same applies to `$ ` prompts. A command that itself
+starts with `>` (for example `> file.log` to truncate a file) is therefore
+read as a quote; write it as `: > file.log`.
+
 The message waits in the queue (card "Running: …") while the command runs, then
 goes to the agent as two blocks:
 
