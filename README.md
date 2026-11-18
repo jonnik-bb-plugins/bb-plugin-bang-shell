@@ -2,7 +2,7 @@
 
 Run a message as a shell command in the thread's environment, on the host where
 the session runs, and send the command and its output to the agent.
-See [PLUGIN_OVERVIEW.md](PLUGIN_OVERVIEW.md).
+See [PLUGIN_OVERVIEW.md](PLUGIN_OVERVIEW.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Why
 
