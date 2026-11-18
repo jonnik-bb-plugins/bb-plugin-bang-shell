@@ -29,7 +29,14 @@ the selection menu, next to Add to chat. The same action sits in each message's
 action bar; without a selection it runs the message's first shell code block
 (`sh`, `bash`, `console`, … or unlabelled; `$ ` prompts are dropped). It sends
 the text through the thread's composer like Mod+Alt+Enter, then puts back
-whatever you were typing.
+whatever you were typing. Closed code blocks in assistant messages also get
+a **Run in terminal** button in the block header that does the same for that
+block. By default this covers blocks labelled `sh`, `bash`, `zsh`, `shell`,
+`console` and `terminal`; `python`/`py`/`python3` blocks opt in with
+`runPythonBlocks` (run as `python3 -` with the code as a heredoc). Unlabelled
+blocks never get the button, because bb does not route them to plugins. Change
+the languages with `runButtonLanguages`; settings changes need
+`bb plugin reload bang-shell`.
 
 Markdown wrapped around a command is removed before it runs, so text that
 **Add to chat** inserts (`` `cmd` ``, `> `cmd` ``) or a pasted fenced block runs
@@ -65,18 +72,20 @@ bb plugin reload bang-shell   # settings are read at load
 
 ## Settings
 
-| Key                | Default | Range     | Meaning                                                                 |
-| ------------------ | ------- | --------- | ----------------------------------------------------------------------- |
-| `enabled`          | `true`  |           | Run commands at all                                                     |
-| `requireRunAction` | `true`  |           | Only run messages sent with the Run in terminal action (see Security)   |
-| `prefix`           | `!`     | 1–4 chars | Command marker; no spaces, must not start with `` ` `` `/` `$` `@` `#`  |
-| `waitSeconds`      | `30`    | 0–3600    | Wait for output before sending; the command keeps running afterwards    |
-| `outputTailChars`  | `3000`  | 1–30000   | Last N output characters sent                                           |
-| `pollIntervalMs`   | `200`   | 50–10000  | Terminal poll interval while waiting                                    |
-| `terminalCols`     | `120`   | 20–500    | Terminal width                                                          |
-| `terminalRows`     | `32`    | 5–200     | Terminal height                                                         |
-| `titleMaxChars`    | `60`    | 1–200     | Terminal tab title length                                               |
-| `disablePager`     | `true`  |           | Run with `PAGER=cat GIT_PAGER=cat` so `git log` and `man` do not wait in a pager |
+| Key                  | Default                                   | Range                                         | Meaning                                                                                                                                                                      |
+| -------------------- | ----------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `true`                                    |                                               | Run commands at all                                                                                                                                                          |
+| `requireRunAction`   | `true`                                    |                                               | Only run messages sent with the Run in terminal action (see Security)                                                                                                        |
+| `prefix`             | `!`                                       | 1–4 chars                                     | Command marker; no spaces, must not start with `` ` `` `/` `$` `@` `#`                                                                                                       |
+| `waitSeconds`        | `30`                                      | 0–3600                                        | Wait for output before sending; the command keeps running afterwards                                                                                                         |
+| `outputTailChars`    | `3000`                                    | 1–30000                                       | Last N output characters sent                                                                                                                                                |
+| `pollIntervalMs`     | `200`                                     | 50–10000                                      | Terminal poll interval while waiting                                                                                                                                         |
+| `terminalCols`       | `120`                                     | 20–500                                        | Terminal width                                                                                                                                                               |
+| `terminalRows`       | `32`                                      | 5–200                                         | Terminal height                                                                                                                                                              |
+| `titleMaxChars`      | `60`                                      | 1–200                                         | Terminal tab title length                                                                                                                                                    |
+| `runButtonLanguages` | `sh, bash, zsh, shell, console, terminal` | sh, bash, zsh, shell, console, terminal, fish | Code block languages with a Run button (comma or space separated); `none` turns the shell button off; unknown entries are dropped, an empty result falls back to the default |
+| `runPythonBlocks`    | `false`                                   |                                               | Also add the Run button to `python`, `py`, `python3` blocks                                                                                                                  |
+| `disablePager`       | `true`                                    |                                               | Run with `PAGER=cat GIT_PAGER=cat` so `git log` and `man` do not wait in a pager                                                                                             |
 
 Out-of-range numbers are clamped; non-numbers and invalid prefixes fall back to
 the default.

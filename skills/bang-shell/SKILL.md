@@ -6,8 +6,10 @@ description: Explains the Bang Shell plugin — the user can run a shell command
 # Bang Shell
 
 The user can send a message with the composer's **Run in terminal** action
-(Mod+Alt+Enter), or pick **Run in terminal** on text highlighted in your answer
-(or on a message's first shell code block). The plugin runs it as a shell command in a terminal of this
+(Mod+Alt+Enter), pick **Run in terminal** on text highlighted in your answer
+(or on a message's first shell code block), or click the Run button on a fenced
+shell code block (Python blocks only when the `runPythonBlocks` setting is on).
+The plugin runs it as a shell command in a terminal of this
 thread's environment, then delivers it to you as:
 
     ```sh

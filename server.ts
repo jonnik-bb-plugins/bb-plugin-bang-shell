@@ -7,7 +7,7 @@ import type {
   MessageDispatchHookContext,
   MessageDispatchHookDecision,
 } from "@get-bb/plugin-sdk";
-import { normalizeCommand } from "./command-text.ts";
+import { DEFAULT_RUN_BUTTON_LANGUAGES, normalizeCommand } from "./command-text.ts";
 
 type ThreadQueuedMessage = MessageDispatchHookContext["queuedMessages"][number];
 
@@ -273,6 +273,19 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Turn off pagers",
       description: "Run commands with PAGER=cat and GIT_PAGER=cat so git log, git diff and man print their output instead of waiting in less.",
       default: true,
+    },
+    runButtonLanguages: {
+      type: "string",
+      label: "Run button languages",
+      description:
+        "Code block languages that get a Run button: sh, bash, zsh, shell, console, terminal, fish (comma or space separated), or none. Read by the app; the server ignores it.",
+      default: DEFAULT_RUN_BUTTON_LANGUAGES,
+    },
+    runPythonBlocks: {
+      type: "boolean",
+      label: "Run button on Python blocks",
+      description: "Also add the Run button to python, py and python3 code blocks (run with python3 in the thread's shell).",
+      default: false,
     },
     titleMaxChars: {
       type: "number",

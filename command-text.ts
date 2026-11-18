@@ -3,6 +3,43 @@
 
 const SHELL_LANGUAGES = new Set(["", "sh", "bash", "zsh", "shell", "console", "terminal", "fish"]);
 
+/** Non-empty shell info strings, for registrations that require a language. */
+export const SHELL_FENCE_LANGUAGES = [...SHELL_LANGUAGES].filter((language) => language !== "");
+
+const PYTHON_FENCE_LANGUAGES = ["python", "py", "python3"];
+/** Every language the Run button may be registered for; settings pick the active subset. */
+export const RUN_FENCE_LANGUAGES = [...SHELL_FENCE_LANGUAGES, ...PYTHON_FENCE_LANGUAGES];
+
+export const DEFAULT_RUN_BUTTON_LANGUAGES = "sh, bash, zsh, shell, console, terminal";
+const RUN_BUTTON_SHELL_CHOICES = new Set(SHELL_FENCE_LANGUAGES);
+
+/**
+ * Shell languages whose code blocks get the Run button. Lowercased, deduped,
+ * unknown entries dropped; "none" turns the shell button off; an empty result
+ * or a non-string falls back to the default.
+ */
+export function parseRunButtonLanguages(value: unknown): string[] {
+  if (typeof value === "string" && value.trim().toLowerCase() === "none") return [];
+  const parse = (text: string) => [
+    ...new Set(
+      text
+        .toLowerCase()
+        .split(/[\s,]+/)
+        .filter((entry) => RUN_BUTTON_SHELL_CHOICES.has(entry)),
+    ),
+  ];
+  const parsed = typeof value === "string" ? parse(value) : [];
+  return parsed.length > 0 ? parsed : parse(DEFAULT_RUN_BUTTON_LANGUAGES);
+}
+
+/** Languages the Run button is enabled for, from the plugin's effective settings. */
+export function enabledRunLanguages(values: Record<string, unknown> | undefined): Set<string> {
+  if (!values) return new Set();
+  const enabled = new Set(parseRunButtonLanguages(values.runButtonLanguages));
+  if (values.runPythonBlocks === true) for (const language of PYTHON_FENCE_LANGUAGES) enabled.add(language);
+  return enabled;
+}
+
 /** First fenced code block whose info string is empty or a shell language, without its fences. */
 export function firstShellBlock(markdown: string): string | null {
   const fence = /^( {0,3})(`{3,}|~{3,})[ \t]*([^\n`]*)\n([\s\S]*?)\n {0,3}\2[`~]*[ \t]*$/gm;
@@ -21,6 +58,28 @@ function stripPrompts(block: string): string {
     .filter((line) => /^\s*\$ /.test(line))
     .map((line) => line.replace(/^\s*\$ /, ""))
     .join("\n");
+}
+
+/** The command a code block's Run button sends: prompts dropped, trimmed; null when empty. */
+export function codeBlockCommand(code: string): string | null {
+  return stripPrompts(code).trim() || null;
+}
+
+/**
+ * The command a code block's Run button sends for its language: shell blocks as
+ * `codeBlockCommand`, python as a heredoc into `python3 -` (prompts kept);
+ * null for other languages or empty code.
+ */
+export function codeFenceCommand(language: string, code: string): string | null {
+  const lang = language.trim().toLowerCase();
+  if (RUN_BUTTON_SHELL_CHOICES.has(lang)) return codeBlockCommand(code);
+  if (!PYTHON_FENCE_LANGUAGES.includes(lang)) return null;
+  const body = code.trimEnd();
+  if (!body.trim()) return null;
+  const lines = new Set(body.split("\n"));
+  let delimiter = "BB_PY_EOF";
+  for (let n = 2; lines.has(delimiter); n += 1) delimiter = `BB_PY_EOF${n}`;
+  return `python3 - <<'${delimiter}'\n${body}\n${delimiter}`;
 }
 
 export function pickCommand(selectedText: string | undefined, messageText: string): string | null {
