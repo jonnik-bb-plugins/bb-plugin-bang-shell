@@ -25,6 +25,12 @@ A zero exit code is implied. Otherwise the last line of the `output` block is
 Terminal panel), a lost-terminal note, a start-failure note, or a note that
 the command was not re-run after a plugin restart.
 
+If a standard run shows a recognizable input prompt or choice, its Terminal
+tab opens in the current thread for the user to answer. Silent and
+unrecognized prompts can be answered there once the regular wait limit opens
+the still-running terminal. Input echoed on screen may be included in the
+captured output.
+
 - Use it when your permission mode or sandbox blocks a command the user can run
   (credentials in `.env`, a database or cluster you must not reach): propose
   the exact command in a `sh` code block and ask the user to run it with
@@ -36,4 +42,16 @@ the command was not re-run after a plugin restart.
 - This plugin is the user's tool, not yours. Never try to trigger it: no
   `bb thread tell '!…'` (refused), no hand-built API requests carrying its
   marker. Run commands with your own shell tools under your permission mode.
+- Thread shell: for steps that share credentials or state (the user types
+  secrets with `read -rs` in one block and later blocks use the variables), tell
+  the user to "run these blocks with Alt-click" on each block's Run button, or
+  Send menu → **Run in thread shell**. That runs them in one persistent shell
+  per thread. Never put a secret in the command text. The `output` block ends
+  with one of these notes when nothing ran or the result is uncertain:
+  `[not run: thread shell busy]`,
+  `[not run: could not reach the thread shell; nothing was sent to it]`,
+  `[not run: the thread shell did not report ready (zsh and bash 4.4+ only); see the Thread shell tab]`,
+  `[could not confirm the command reached the thread shell; it was not re-run and may not have run]`.
+  After "busy", ask the user to wait for the running command or press Ctrl-C.
+  Only the user triggers the thread shell; you never can.
 - Settings: `bb plugin config bang-shell` (reload the plugin after a change).

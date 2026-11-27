@@ -87,6 +87,140 @@ test("messageText joins text blocks like core; authKey ignores outer whitespace"
   assert.notEqual(authKey("t", "!ls"), authKey("u", "!ls"));
 });
 
+// ------------------------------------------------- fake interactive terminal
+
+const notFound = () => Object.assign(new Error("HTTP 404: Terminal session not found"), { code: "terminal_not_found" });
+
+const MARK_S = (n: string) => `\u001b]7777;${n};S\u0007`;
+const MARK_E = (n: string, status: number) => `\u001b]7777;${n};E;${status}\u0007`;
+const PROMPT = "                    \r\r\u001b[0m~/proj % ";
+
+/** `noStart`: the shell never runs it (parse error), the prompt just returns. `silent`: no marks at all (a continuation prompt). */
+type Program = { output: string; exit: number; hold: boolean; noStart?: boolean; silent?: boolean };
+type FakeShell = {
+  id: string;
+  title: string;
+  nonce: string | null;
+  /** `fish` never prints a mark. */
+  kind: "zsh" | "fish";
+  status: "running" | "exited";
+  /** A command (or a program waiting for input) is running: S seen, E not yet. */
+  busy: boolean;
+  chunks: { seq: number; data: string }[];
+  /** Pasted command blocks, in order. */
+  commands: string[];
+  setups: string[];
+  /** Input that was not a setup line or a paste, or arrived while busy. */
+  stray: string[];
+  inputCalls: number;
+  inputFails: number;
+  split: boolean;
+  next: Program | null;
+  /** How long the shell takes to report ready after the setup line. */
+  setupDelayMs: number;
+  /** How long the shell takes to start the pasted command. */
+  startDelayMs: number;
+  /** The host no longer knows this terminal: `output` and `get` throw not-found. */
+  missing: boolean;
+};
+
+function fakeShells() {
+  const map = new Map<string, FakeShell>();
+  const emit = (sh: FakeShell, text: string) => {
+    const parts = sh.split ? [text.slice(0, Math.ceil(text.length / 2)), text.slice(Math.ceil(text.length / 2))] : [text];
+    for (const data of parts) if (data) sh.chunks.push({ seq: sh.chunks.length, data });
+  };
+  const api = {
+    map,
+    create(id: string, title: string, kind: FakeShell["kind"], next: Program | null, setupDelayMs = 0) {
+      const sh: FakeShell = {
+        id, title, nonce: null, kind, status: "running", busy: false, chunks: [], commands: [], setups: [], stray: [],
+        inputCalls: 0, inputFails: 0, split: false, next, setupDelayMs, startDelayMs: 0, missing: false,
+      };
+      map.set(id, sh);
+      emit(sh, "~/proj % ");
+      return sh;
+    },
+    output(id: string, sinceSeq = 0, tailBytes?: number) {
+      const sh = map.get(id)!;
+      let chunks = sh.chunks.filter((c) => c.seq >= sinceSeq);
+      if (tailBytes !== undefined) {
+        // The newest chunks that fit, at least one, like a bounded scrollback read.
+        let size = 0;
+        const keep = chunks.filter((_, i) => {
+          size += chunks[chunks.length - 1 - i].data.length;
+          return size <= tailBytes || i === 0;
+        });
+        chunks = keep.length ? chunks.slice(chunks.length - keep.length) : chunks;
+      }
+      return {
+        chunks: chunks.map((c) => ({ seq: c.seq, dataBase64: Buffer.from(c.data).toString("base64") })),
+        nextSeq: sh.chunks.length,
+        status: sh.status,
+        exitCode: null,
+      };
+    },
+    input(id: string, dataBase64: string) {
+      const sh = map.get(id)!;
+      sh.inputCalls += 1;
+      if (sh.inputFails > 0) {
+        sh.inputFails -= 1;
+        throw new Error("input failed");
+      }
+      const text = Buffer.from(dataBase64, "base64").toString();
+      if (sh.busy) return void sh.stray.push(text);
+      const setup = /__bs_n=(\w+);/.exec(text);
+      if (setup) {
+        sh.setups.push(text);
+        if (sh.kind === "zsh") {
+          const nonce = setup[1];
+          sh.nonce = nonce;
+          const ready = () => emit(sh, MARK_E(nonce, 0) + PROMPT);
+          if (sh.setupDelayMs > 0) setTimeout(ready, sh.setupDelayMs);
+          else ready();
+        }
+        return;
+      }
+      const paste = /^\u001b\[200~([\s\S]*)\u001b\[201~\r$/.exec(text);
+      if (!paste) return void sh.stray.push(text);
+      sh.commands.push(paste[1]);
+      const program = sh.next ?? { output: "out\r\n", exit: 0, hold: false };
+      sh.next = null;
+      const run = () => {
+        if (program.noStart) return void emit(sh, `\r\n${program.output}${MARK_E(sh.nonce!, program.exit)}${PROMPT}`);
+        emit(sh, `\r\n${program.silent ? "" : MARK_S(sh.nonce!)}${program.output}`);
+        if (program.hold) sh.busy = true;
+        else emit(sh, MARK_E(sh.nonce!, program.exit) + PROMPT);
+      };
+      // The start mark appears only once the shell has read the paste.
+      if (sh.startDelayMs > 0) {
+        sh.busy = true;
+        setTimeout(() => {
+          sh.busy = false;
+          run();
+        }, sh.startDelayMs);
+      } else run();
+    },
+    emit,
+    /** The running program ends by itself. */
+    finish(sh: FakeShell, exit = 0, output = "") {
+      sh.busy = false;
+      emit(sh, output + MARK_E(sh.nonce!, exit) + PROMPT);
+    },
+    ctrlC(sh: FakeShell) {
+      emit(sh, "^C\r\n");
+      api.finish(sh, 130);
+    },
+    /** The user types a command in the panel: it starts and, if `hold`, keeps running. */
+    userRun(sh: FakeShell, hold: boolean) {
+      emit(sh, `\r\n${MARK_S(sh.nonce!)}`);
+      sh.busy = hold;
+      if (!hold) emit(sh, MARK_E(sh.nonce!, 0) + PROMPT);
+    },
+  };
+  return api;
+}
+
 // ------------------------------------------------------------ fake bb core
 
 type Decision = { action: string; message?: string; reason?: string; sendAt?: number | null };
@@ -117,22 +251,37 @@ function core(settings: Record<string, unknown> = {}, kvDelayMs = 0) {
   /** Reads of keys with these prefixes return the value as of the call, after a delay (once each). */
   const staleReads = new Map<string, number>();
   const created: string[] = [];
+  const commandChunks = new Map<string, string[]>();
   const closed: string[] = [];
   const rows: Row[] = [];
   const sent: string[] = [];
+  const reveals: { channel: string; payload: unknown }[] = [];
   const listeners = new Map<string, (p: { entry: Row }) => void>();
   let disposers: (() => void)[] = [];
   let hook: ((ctx: unknown) => Promise<Decision>) | null = null;
   let lastDecision = new Map<string, Decision>();
+  const fake = fakeShells();
   const state = {
+    shellKind: "zsh" as FakeShell["kind"],
+    /** What the first command written to a new thread shell does (default: prints `out`, exits 0). */
+    firstProgram: null as Program | null,
+    /** The next N `terminals.output` calls on a thread shell throw. */
+    failOutputs: 0,
+    /** Arguments of every successful `terminals.output` on a thread shell. */
+    shellReads: [] as { sinceSeq?: number; tailBytes?: number }[],
+    setupDelayMs: 0,
+    /** Called at the start of every `terminals.input`, before the terminal sees the bytes. */
+    onInput: null as (() => void) | null,
     terminalStatus: "exited" as "exited" | "running" | "throw",
     failUpdates: 0,
     rechecks: 0,
     outputCalls: 0,
+    output: null as string | null,
   };
 
   const bb = {
     pluginId: PLUGIN,
+    realtime: { publish: (channel: string, payload: unknown) => reveals.push({ channel, payload }) },
     log: { info() {}, warn() {}, error() {}, debug() {} },
     settings: {
       define(descriptors: Record<string, { default?: unknown }>) {
@@ -173,16 +322,42 @@ function core(settings: Record<string, unknown> = {}, kvDelayMs = 0) {
     },
     sdk: {
       terminals: {
-        create: async (args: { start: { command: string }; title: string }) => {
+        create: async (args: { start: { mode?: string; command: string }; title: string; id?: string }) => {
+          if (args.start.mode === "shell") {
+            fake.create(args.id!, args.title, state.shellKind, state.firstProgram, state.setupDelayMs);
+            return { id: args.id!, title: args.title };
+          }
           created.push(args.start.command.startsWith(NO_PAGER_PREFIX) ? args.start.command.slice(NO_PAGER_PREFIX.length) : `RAW:${args.start.command}`);
           return { id: `term-${created.length}`, title: args.title };
         },
-        output: async () => {
+        get: async ({ terminalId }: { terminalId: string }) => {
+          if (fake.map.get(terminalId)!.missing) throw notFound();
+          return { status: fake.map.get(terminalId)!.status };
+        },
+        input: async ({ terminalId, dataBase64 }: { terminalId: string; dataBase64: string }) => {
+          state.onInput?.();
+          return fake.input(terminalId, dataBase64);
+        },
+        output: async ({ terminalId, sinceSeq, tailBytes }: { terminalId: string; sinceSeq?: number; tailBytes?: number }) => {
+          if (fake.map.has(terminalId)) {
+            if (fake.map.get(terminalId)!.missing) throw notFound();
+            if (state.failOutputs > 0) {
+              state.failOutputs -= 1;
+              throw new Error("transient");
+            }
+            state.shellReads.push({ sinceSeq, tailBytes });
+            return fake.output(terminalId, sinceSeq, tailBytes);
+          }
           state.outputCalls += 1;
           if (state.terminalStatus === "throw") throw new Error("gone");
+          const chunks = commandChunks.get(terminalId) ?? [];
+          const output = state.output ?? (commandChunks.has(terminalId) ? "" : "out\r\n");
+          if (output) chunks.push(output);
+          commandChunks.set(terminalId, chunks);
+          state.output = null;
           return {
-            chunks: [{ dataBase64: Buffer.from("out\r\n").toString("base64"), seq: 1 }],
-            nextSeq: 2,
+            chunks: chunks.slice(sinceSeq ?? 0).map((data, i) => ({ dataBase64: Buffer.from(data).toString("base64"), seq: (sinceSeq ?? 0) + i })),
+            nextSeq: chunks.length,
             status: state.terminalStatus,
             exitCode: state.terminalStatus === "exited" ? 0 : null,
           };
@@ -232,12 +407,18 @@ function core(settings: Record<string, unknown> = {}, kvDelayMs = 0) {
   }
 
   const api = {
+    fake,
+    /** The thread shell terminals, in creation order. */
+    get shells() {
+      return [...fake.map.values()];
+    },
     kvStore,
     staleReads,
     created,
     closed,
     rows,
     sent,
+    reveals,
     state,
     async load() {
       await plugin(bb as never);
@@ -730,3 +911,513 @@ test("markdown wrapped around a sent command is stripped before it runs", async 
   assert.deepEqual(c.created, ["echo quoted"]);
   assert.match(c.sent[0], /^```sh\necho quoted\n```/);
 });
+
+// ------------------------------------------------------------- thread shell
+
+const SHELL = { experimental_submission: { pluginId: PLUGIN, data: { bangShell: 2 } } };
+const shellMessage = (command: string, output: string) => `\`\`\`sh\n${command}\n\`\`\`\n\n\`\`\`output\n${output}\n\`\`\``;
+
+async function waitUntil(done: () => boolean, ms = 3000) {
+  const end = Date.now() + ms;
+  while (!done()) {
+    if (Date.now() > end) throw new Error("timed out");
+    await pause(10);
+  }
+}
+
+test("thread shell: runs in one interactive shell, sends only this command's output, never closes it", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const { row } = await c.send("echo hi", SHELL);
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.deepEqual(c.sent, [shellMessage("echo hi", "out")]);
+  const [shell] = c.shells;
+  assert.equal(c.shells.length, 1);
+  assert.equal(shell.title, "Thread shell");
+  assert.match(shell.id, /^term_[23456789abcdefghijkmnpqrstuvwxyz]{10}$/);
+  assert.deepEqual(shell.commands, ["echo hi"]);
+  assert.equal(shell.setups.length, 1);
+  assert.match(shell.setups[0], /PAGER=cat/);
+  assert.deepEqual(shell.stray, []);
+  assert.deepEqual(c.created, [], "no per-command terminal");
+  assert.deepEqual(c.closed, [], "the plugin never closes the thread shell");
+  await pause(50);
+  assert.deepEqual([...c.kvStore.keys()], ["shell:thr_1"]);
+});
+
+test("thread shell: pager setting off leaves PAGER alone", async () => {
+  const c = core({ pollIntervalMs: 50, disablePager: false });
+  await c.load();
+  const { row } = await c.send("git log", SHELL);
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.doesNotMatch(c.shells[0].setups[0], /PAGER/);
+});
+
+test("thread shell: a multi-line block is one paste, the shell is reused, exit codes and per-command output hold", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const block = 'read -r "X?prompt: "\necho "got:$X"';
+  const first = await c.send(block, SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  c.shells[0].next = { output: "second\r\n", exit: 3, hold: false };
+  const second = await c.send("false", SHELL);
+  await c.drive(second.row!, () => c.sent.length === 2);
+  assert.deepEqual(c.shells[0].commands, [block, "false"]);
+  assert.equal(c.shells.length, 1);
+  assert.equal(c.shells[0].setups.length, 1, "setup runs once per shell");
+  assert.equal(c.sent[1], shellMessage("false", "second\n[exit 3]"));
+});
+
+test("thread shell: a busy shell refuses with a hook reject and nothing is typed into the program", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 60 });
+  c.state.firstProgram = { output: "", exit: 0, hold: true };
+  await c.load();
+  const first = await c.send("read -r X", SHELL);
+  await waitUntil(() => c.shells.length === 1 && c.shells[0].commands.length === 1);
+  const refused = await c.ask("echo b", SHELL);
+  assert.equal(refused.action, "reject");
+  assert.match(refused.message!, /still running/);
+  assert.match(refused.message!, /Ctrl-C/);
+  assert.deepEqual(c.shells[0].commands, ["read -r X"]);
+  assert.deepEqual(c.shells[0].stray, []);
+  c.fake.ctrlC(c.shells[0]);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  assert.match(c.sent[0], /\[exit 130\]/);
+  assert.equal((await c.ask("echo c", SHELL)).action, "wait", "Ctrl-C returns the shell to idle");
+});
+
+test("thread shell: waits for its own end mark past waitSeconds and delivers the full output and exit code", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 0, threadShellWaitSeconds: 60 });
+  c.state.firstProgram = { output: "prompt: ", exit: 0, hold: true };
+  await c.load();
+  const { row } = await c.send("read -r X", SHELL);
+  await waitUntil(() => c.shells.length === 1 && c.shells[0].commands.length === 1);
+  await pause(300);
+  await c.reask(row!);
+  assert.deepEqual(c.sent, [], "still waiting for the end mark");
+  c.fake.finish(c.shells[0], 3, "typed\r\n");
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.equal(c.sent[0], shellMessage("read -r X", "prompt: typed\n[exit 3]"));
+});
+
+test("thread shell: a command that outlived threadShellWaitSeconds keeps the shell busy until it really finishes", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 60, threadShellWaitSeconds: 0 });
+  c.state.firstProgram = { output: "", exit: 0, hold: true };
+  await c.load();
+  const { row } = await c.send("sleep 99", SHELL);
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.match(c.sent[0], /still running in terminal tab "Thread shell"/);
+  assert.equal((await c.ask("echo b", SHELL)).action, "reject");
+  c.fake.finish(c.shells[0]);
+  assert.equal((await c.ask("echo b", SHELL)).action, "wait");
+});
+
+test("thread shell: a click while the first use is still setting the shell up is refused", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  c.state.setupDelayMs = 400;
+  await c.load();
+  const a = await c.send("echo a", SHELL);
+  await waitUntil(() => c.shells.length === 1);
+  assert.equal((await c.ask("echo b", SHELL)).action, "reject");
+  await c.drive(a.row!, () => c.sent.length === 1);
+  assert.deepEqual(c.shells[0].commands, ["echo a"]);
+});
+
+test("thread shell: a click between the write and the shell's start mark is refused", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const first = await c.send("true", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  c.shells[0].startDelayMs = 400;
+  const second = await c.send("echo slow", SHELL);
+  await waitUntil(() => c.shells[0].commands.length === 2);
+  assert.equal((await c.ask("echo b", SHELL)).action, "reject");
+  await c.drive(second.row!, () => c.sent.length === 2);
+  assert.deepEqual(c.shells[0].commands, ["true", "echo slow"]);
+  assert.deepEqual(c.shells[0].stray, []);
+});
+
+test("thread shell: a manual command in the panel is busy until it ends", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const { row } = await c.send("true", SHELL);
+  await c.drive(row!, () => c.sent.length === 1);
+  c.fake.userRun(c.shells[0], true);
+  assert.equal((await c.ask("echo b", SHELL)).action, "reject");
+  c.fake.finish(c.shells[0]);
+  assert.equal((await c.ask("echo b", SHELL)).action, "wait");
+});
+
+test("thread shell: busy at start (race after the hook) sends a note and writes nothing", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const { row } = await c.send("true", SHELL);
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.equal((await c.ask("echo b", SHELL)).action, "wait");
+  c.fake.userRun(c.shells[0], true);
+  const queued = c.queueRow("echo b", { waitingOn: { kind: "plugin", pluginId: PLUGIN } });
+  await c.drive(queued, () => c.sent.length === 2);
+  assert.match(c.sent[1], /\[not run: thread shell busy\]/);
+  assert.deepEqual(c.shells[0].commands, ["true"]);
+  assert.deepEqual(c.shells[0].stray, []);
+});
+
+test("thread shell: two quick clicks write once; the second is refused or told it did not run", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 60 });
+  c.state.firstProgram = { output: "", exit: 0, hold: true };
+  await c.load();
+  const a = await c.send("sleep 99", SHELL);
+  const b = await c.send("echo b", SHELL);
+  await pause(300);
+  assert.equal(c.shells[0].commands.length, 1);
+  assert.deepEqual(c.shells[0].stray, []);
+  if (b.decision.action === "wait") {
+    await c.drive(b.row!, () => c.sent.length === 1);
+    assert.match(c.sent[0], /not run: thread shell busy/);
+  } else assert.equal(b.decision.action, "reject");
+  c.fake.finish(c.shells[0]);
+  await c.drive(a.row!, () => !c.rows.includes(a.row!));
+  assert.equal(c.shells[0].commands.length, 1);
+  assert.deepEqual(c.shells[0].stray, []);
+});
+
+test("thread shell: the job is saved as written before the command reaches the terminal", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  const states: unknown[] = [];
+  c.state.onInput = () =>
+    states.push([...c.kvStore].filter(([k]) => k.startsWith("job:")).map(([, v]) => v as { state: string; sinceSeq?: number; nonce?: string })[0]);
+  await c.load();
+  const { row } = await c.send("make", SHELL);
+  await c.drive(row!, () => c.sent.length === 1);
+  const [atSetup, atCommand] = states as { state: string; sinceSeq?: number; nonce?: string }[];
+  assert.equal(atSetup.state, "starting", "setup line is typed before the command is written");
+  assert.equal(atCommand.state, "running");
+  assert.equal(typeof atCommand.sinceSeq, "number");
+  assert.match(atCommand.nonce!, /^[0-9a-f]{12}$/);
+});
+
+test("thread shell: a resumed job that never saw its command start says so instead of claiming it ran", async () => {
+  const c = core({ pollIntervalMs: 50, threadShellWaitSeconds: 0 });
+  await c.load();
+  const shell = c.fake.create("term_aaaaaaaaaa", "Thread shell", "zsh", null);
+  shell.nonce = "0123456789ab";
+  const row = {
+    id: "q9", threadId: "thr_1", content: [{ type: "text", text: "make", mentions: [] }], updatedAt: 1,
+    initiator: "user", senderThreadId: null, originPluginId: null, waitingOn: { kind: "plugin", pluginId: PLUGIN },
+    createdAt: Date.now(),
+  };
+  c.rows.push(row);
+  c.kvStore.set("job:j1", {
+    id: "j1", threadId: "thr_1", textKey: authKey("thr_1", "make"), command: "make", terminalTitle: "Thread shell", createdAt: Date.now() - 10_000,
+    target: "shell", state: "running", rowId: "q9", terminalId: "term_aaaaaaaaaa", nonce: "0123456789ab", sinceSeq: 1, message: null, rewriteAttempts: 0,
+  });
+  c.kvStore.set("row:q9", "j1");
+  await c.reask(row);
+  await c.drive(row, () => c.sent.length === 1);
+  assert.match(c.sent[0], /may not have run/);
+  assert.doesNotMatch(c.sent[0], /still running/);
+  assert.equal(shell.commands.length, 0);
+});
+
+test("thread shell: a failed write is reported as uncertain and never repeated", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const first = await c.send("true", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  const calls = c.shells[0].inputCalls;
+  c.shells[0].inputFails = 1;
+  const { row } = await c.send("rm -rf build", SHELL);
+  await c.drive(row!, () => c.sent.length === 2);
+  assert.match(c.sent[1], /may not have run/);
+  await pause(300);
+  assert.equal(c.shells[0].inputCalls, calls + 1, "exactly one attempt");
+  assert.deepEqual(c.shells[0].commands, ["true"]);
+});
+
+test("thread shell: a closed shell is replaced by a new one on the next use", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const first = await c.send("true", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  c.shells[0].status = "exited";
+  const second = await c.send("echo again", SHELL);
+  await c.drive(second.row!, () => c.sent.length === 2);
+  assert.equal(c.shells.length, 2);
+  assert.notEqual(c.shells[0].id, c.shells[1].id);
+  assert.deepEqual(c.shells[1].commands, ["echo again"]);
+  assert.equal(c.sent[1], shellMessage("echo again", "out"));
+  assert.deepEqual(c.closed, []);
+});
+
+test("thread shell: the terminal vanishing mid-command ends the job and forgets the shell", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 60 });
+  c.state.firstProgram = { output: "", exit: 0, hold: true };
+  await c.load();
+  const { row } = await c.send("sleep 99", SHELL);
+  await waitUntil(() => c.shells.length === 1 && c.shells[0].commands.length === 1);
+  c.shells[0].status = "exited";
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.match(c.sent[0], /lost the terminal/);
+  await pause(50);
+  assert.equal(c.kvStore.has("shell:thr_1"), false);
+});
+
+test("thread shell: a shell that never reports ready is unsupported within a bounded time and gets no command", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  c.state.shellKind = "fish";
+  await c.load();
+  const started = Date.now();
+  const { row } = await c.send("echo hi", SHELL);
+  await c.drive(row!, () => c.sent.length === 1, 9000);
+  assert.ok(Date.now() - started < 8000);
+  assert.match(c.sent[0], /\[not run: .*(zsh and bash)/);
+  assert.deepEqual(c.shells[0].commands, []);
+  assert.deepEqual(c.shells[0].stray, []);
+  assert.deepEqual(c.closed, []);
+  assert.equal(c.kvStore.has("shell:thr_1"), false);
+});
+
+test("thread shell: a job bound by an earlier load but not written is reported, never written", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const row = {
+    id: "q9", threadId: "thr_1", content: [{ type: "text", text: "make deploy", mentions: [] }], updatedAt: 1,
+    initiator: "user", senderThreadId: null, originPluginId: null, waitingOn: { kind: "plugin", pluginId: PLUGIN },
+    createdAt: Date.now(),
+  };
+  c.rows.push(row);
+  c.kvStore.set("job:j1", {
+    id: "j1", threadId: "thr_1", textKey: authKey("thr_1", "make deploy"), command: "make deploy", terminalTitle: "Thread shell", createdAt: Date.now(),
+    target: "shell", state: "starting", rowId: "q9", terminalId: null, message: null, rewriteAttempts: 0,
+  });
+  c.kvStore.set("row:q9", "j1");
+  await c.reask(row);
+  await c.drive(row, () => c.sent.length === 1);
+  assert.match(c.sent[0], /was not re-run/);
+  assert.equal(c.shells.length, 0);
+});
+
+test("thread shell: a plugin reload mid-command resumes polling and does not write again", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 60 });
+  c.state.firstProgram = { output: "out\r\n", exit: 0, hold: true };
+  await c.load();
+  const { row } = await c.send("make", SHELL);
+  await waitUntil(() => c.shells.length === 1 && c.shells[0].commands.length === 1);
+  const shell = c.shells[0];
+  c.reload();
+  await c.load();
+  c.fake.finish(shell, 0, "built\r\n");
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.match(c.sent[0], /```output\nout\nbuilt\n```$/);
+  assert.deepEqual(shell.commands, ["make"]);
+  assert.deepEqual(shell.stray, []);
+  assert.equal(shell.setups.length, 1);
+});
+
+test("thread shell: a marker from another plugin, an agent or legacy mode never reaches the shell", async () => {
+  const c = core({ requireRunAction: false, pollIntervalMs: 50 });
+  await c.load();
+  const forged = { experimental_submission: { pluginId: "evil", data: { bangShell: 2 } } };
+  assert.equal((await c.send("id", forged)).decision.action, "proceed");
+  assert.equal((await c.send("id", { initiator: "agent", senderThreadId: "thr_x", ...SHELL })).decision.action, "proceed");
+  const legacy = await c.send("!echo hi");
+  await c.drive(legacy.row!, () => c.sent.length === 3);
+  assert.deepEqual(c.created, ["echo hi"], "legacy and the old marker still use a per-command terminal");
+  assert.equal(c.shells.length, 0);
+});
+
+test("the Run in terminal marker still uses a fresh per-command terminal that closes", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const { row } = await c.send("ls", OWN);
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.deepEqual(c.created, ["ls"]);
+  assert.deepEqual(c.closed, ["term-1"]);
+  assert.equal(c.shells.length, 0);
+});
+
+test("thread shell: refused like any run for empty, oversized or environment-less submissions", async () => {
+  const c = core();
+  await c.load();
+  assert.equal((await c.ask("   ", SHELL)).action, "reject");
+  assert.equal((await c.ask("x".repeat(MAX_COMMAND_CHARS + 1), SHELL)).action, "reject");
+  assert.equal((await c.ask("ls", { ...SHELL, environment: null })).action, "reject");
+});
+
+test("thread shell: a parse error ends its own job and does not swallow the next command's output", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  c.state.firstProgram = { output: "zsh: parse error near `fi'\r\n", exit: 1, hold: false, noStart: true };
+  await c.load();
+  const first = await c.send("echo a; fi", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  assert.match(c.sent[0], /parse error near `fi'/);
+  assert.match(c.sent[0], /\[exit 1\]/);
+  const second = await c.send("echo hi", SHELL);
+  await c.drive(second.row!, () => c.sent.length === 2);
+  assert.equal(c.sent[1], shellMessage("echo hi", "out"));
+  assert.equal(c.shells.length, 1);
+});
+
+test("thread shell: a transient output error neither recreates the shell nor drops its record", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const first = await c.send("export X=1", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  const record = structuredClone(c.kvStore.get("shell:thr_1"));
+  c.state.failOutputs = 2; // the hook's idle read, then the start path's liveness read
+  const second = await c.send("echo $X", SHELL);
+  await c.drive(second.row!, () => c.sent.length === 2);
+  assert.match(c.sent[1], /could not reach the thread shell/);
+  assert.equal(c.shells.length, 1, "no new terminal");
+  assert.equal((c.kvStore.get("shell:thr_1") as { terminalId: string }).terminalId, (record as { terminalId: string }).terminalId);
+  assert.deepEqual(c.shells[0].commands, ["export X=1"], "nothing was written");
+  const third = await c.send("echo $X", SHELL);
+  await c.drive(third.row!, () => c.sent.length === 3);
+  assert.equal(c.shells.length, 1);
+  assert.deepEqual(c.shells[0].commands, ["export X=1", "echo $X"]);
+});
+
+test("thread shell: an unterminated block leaves the shell busy until an end mark follows it", async () => {
+  const c = core({ pollIntervalMs: 50, threadShellWaitSeconds: 0 });
+  c.state.firstProgram = { output: "> ", exit: 0, hold: true, silent: true };
+  await c.load();
+  const first = await c.send("cat <<EOF\nx", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  const refused = await c.ask("echo b", SHELL);
+  assert.equal(refused.action, "reject");
+  assert.match(refused.message!, /still running/);
+  assert.deepEqual(c.shells[0].stray, []);
+  c.fake.ctrlC(c.shells[0]);
+  assert.equal((await c.ask("echo b", SHELL)).action, "wait", "Ctrl-C at the continuation prompt ends with an end mark");
+  const second = await c.send("echo c", SHELL);
+  await c.drive(second.row!, () => c.sent.length === 2);
+  assert.deepEqual(c.shells[0].commands, ["cat <<EOF\nx", "echo c"]);
+  assert.deepEqual(c.shells[0].stray, []);
+});
+
+test("thread shell: poll failures that do not prove the terminal is gone keep the shell record", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 60 });
+  c.state.firstProgram = { output: "", exit: 0, hold: true };
+  await c.load();
+  const { row } = await c.send("sleep 99", SHELL);
+  await waitUntil(() => c.shells.length === 1 && c.shells[0].commands.length === 1);
+  c.state.failOutputs = 1000;
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.match(c.sent[0], /lost the terminal/);
+  assert.equal(c.kvStore.has("shell:thr_1"), true);
+  assert.equal(c.shells.length, 1);
+});
+
+test("thread shell: a terminal the host no longer knows is replaced, not reported unreachable forever", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const first = await c.send("true", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  c.shells[0].missing = true;
+  const second = await c.send("echo again", SHELL);
+  await c.drive(second.row!, () => c.sent.length === 2);
+  assert.equal(c.shells.length, 2);
+  assert.equal(c.sent[1], shellMessage("echo again", "out"));
+  assert.deepEqual(c.shells[1].commands, ["echo again"]);
+  assert.equal((c.kvStore.get("shell:thr_1") as { terminalId: string }).terminalId, c.shells[1].id);
+});
+
+test("thread shell: failing output reads while get reports the terminal exited replace the shell", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const first = await c.send("true", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  c.shells[0].status = "exited";
+  c.state.failOutputs = 2; // the hook's idle read, then the start path's liveness read
+  const second = await c.send("echo again", SHELL);
+  await c.drive(second.row!, () => c.sent.length === 2);
+  assert.equal(c.shells.length, 2);
+  assert.deepEqual(c.shells[1].commands, ["echo again"]);
+});
+
+test("thread shell: idle is read from a bounded tail, and output after the job's end mark does not make it busy", async () => {
+  const c = core({ pollIntervalMs: 50 });
+  await c.load();
+  const first = await c.send("true", SHELL);
+  await c.drive(first.row!, () => c.sent.length === 1);
+  const [shell] = c.shells;
+  c.fake.userRun(shell, true);
+  for (let i = 0; i < 10; i += 1) c.fake.emit(shell, "x".repeat(10_000));
+  c.fake.finish(shell);
+  c.state.shellReads.length = 0;
+  assert.equal((await c.ask("echo b", SHELL)).action, "wait");
+  assert.ok(c.state.shellReads.length > 0);
+  assert.ok(c.state.shellReads.every((read) => read.tailBytes !== undefined && read.sinceSeq === undefined), "always a bounded tail");
+});
+
+test("thread shell: a long output with no end mark after the write is busy", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 60 });
+  c.state.firstProgram = { output: "", exit: 0, hold: true };
+  await c.load();
+  const { row } = await c.send("make", SHELL);
+  await waitUntil(() => c.shells.length === 1 && c.shells[0].commands.length === 1);
+  for (let i = 0; i < 10; i += 1) c.fake.emit(c.shells[0], "y".repeat(10_000));
+  const refused = await c.ask("echo b", SHELL);
+  assert.equal(refused.action, "reject");
+  c.fake.finish(c.shells[0]);
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.deepEqual(c.shells[0].stray, []);
+});
+
+test("input prompt: split output reveals its own terminal once, stays queued and sends final result", async () => {
+  const c = core({ pollIntervalMs: 50, waitSeconds: 1, threadShellWaitSeconds: 3 });
+  c.state.terminalStatus = "running";
+  c.state.output = "Continue? [Y/";
+  await c.load();
+  const { row } = await c.send("installer", OWN);
+  await waitUntil(() => c.state.outputCalls > 0);
+  c.state.output = "n] ";
+  await waitUntil(() => c.reveals.length === 1);
+  assert.deepEqual(c.reveals[0], { channel: "terminal-reveal", payload: { threadId: "thr_1", terminalId: "term-1" } });
+  await pause(1100);
+  assert.deepEqual(c.sent, [], "prompt extends the wait past waitSeconds");
+  c.reload();
+  await c.load();
+  await c.reask(row!);
+  await pause(400);
+  assert.equal(c.reveals.length, 1, "reload does not reveal twice");
+  c.state.output = "accepted\r\n";
+  c.state.terminalStatus = "exited";
+  await c.drive(row!, () => c.sent.length === 1);
+  assert.match(c.sent[0], /accepted/);
+  assert.deepEqual(c.created, ["installer"]);
+  assert.deepEqual(c.closed, ["term-1"]);
+});
+
+test("input prompt: completed commands do not reveal; timeout reveals an unmatched running command", async () => {
+  const done = core({ pollIntervalMs: 50 });
+  done.state.output = "Password: ";
+  await done.load();
+  const a = await done.send("echo", OWN);
+  await done.drive(a.row!, () => done.sent.length === 1);
+  assert.deepEqual(done.reveals, []);
+  const slow = core({ pollIntervalMs: 50, waitSeconds: 0 });
+  slow.state.terminalStatus = "running";
+  await slow.load();
+  const b = await slow.send("silent", OWN);
+  await slow.drive(b.row!, () => slow.sent.length === 1);
+  assert.equal(slow.reveals.length, 1);
+  assert.match(slow.sent[0], /still running/);
+  assert.deepEqual(slow.closed, []);
+  slow.reload();
+});
+
+for (const prompt of ["Выберите вариант: ", "Имя: ", "1) one\r\n2) two\r\n#? "]) {
+  test(`input prompt: reveals a quiet unfinished line ${JSON.stringify(prompt)}`, async () => {
+    const c = core({ pollIntervalMs: 50, waitSeconds: 60 });
+    c.state.terminalStatus = "running";
+    c.state.output = prompt;
+    await c.load();
+    const { row } = await c.send("read", OWN);
+    await waitUntil(() => c.reveals.length === 1);
+    assert.deepEqual(c.sent, []);
+    c.state.terminalStatus = "exited";
+    await c.drive(row!, () => c.sent.length === 1);
+    assert.equal(c.reveals.length, 1);
+  });
+}

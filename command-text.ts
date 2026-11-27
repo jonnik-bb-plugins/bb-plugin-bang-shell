@@ -1,6 +1,12 @@
 // Picks the command a message action runs: the highlighted text, or, from the
 // per-message action button, the first shell code block in the message.
 
+/** Title of the thread shell terminal: the server names it, the app finds it by this title. */
+export const THREAD_SHELL_TITLE = "Thread shell";
+
+/** Ephemeral request to show a running command in its existing terminal. */
+export const TERMINAL_REVEAL_CHANNEL = "terminal-reveal";
+
 const SHELL_LANGUAGES = new Set(["", "sh", "bash", "zsh", "shell", "console", "terminal", "fish"]);
 
 /** Non-empty shell info strings, for registrations that require a language. */

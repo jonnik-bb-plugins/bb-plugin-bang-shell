@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [0.5.0] - 2026-11-27
+
+### Added
+
+- Standard runs open their existing terminal tab when they show a recognizable
+  input prompt or choice, allowing up to `threadShellWaitSeconds` to answer
+  and finish while preserving the original `waitSeconds` deadline. Without a
+  recognized prompt, a still-running command opens its tab at `waitSeconds`
+  and sends the output so far; the command keeps running, so silent reads can
+  be answered there.
+- **Thread shell**: Alt-click a code block's Run button, or use **Send menu →
+  Run in thread shell**, to run a command in one persistent interactive shell
+  per thread. Exported variables and the working folder carry over between
+  commands, so a block can use values another block read with `read -rs`. A
+  green dot on the Run button shows a live thread shell. A command sent while
+  the shell is busy is refused; closing the terminal starts a fresh shell. zsh
+  is the supported shell; bash 4.4+ is untested live (a multi-line block may be
+  reported after its first line only); other shells are reported
+  unsupported. Sending a command this way opens the Thread shell terminal tab.
+  The message waits for the command to finish, up to the new
+  `threadShellWaitSeconds` setting (default 600); `waitSeconds` applies only to
+  per-command terminals.
+
+### Fixed
+
+- The Run button and the message action did nothing on an empty composer: the
+  command was submitted before the composer had picked it up.
+
 ## [0.4.0] - 2026-11-18
 
 ### Added
@@ -93,6 +123,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   host where the session runs. The command and its output are sent to the
   agent as two blocks. All tunables are plugin settings.
 
+[0.5.0]: https://github.com/jonnik-bb-plugins/bb-plugin-bang-shell/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jonnik-bb-plugins/bb-plugin-bang-shell/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jonnik-bb-plugins/bb-plugin-bang-shell/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/jonnik-bb-plugins/bb-plugin-bang-shell/compare/v0.2.1...v0.2.2

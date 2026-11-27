@@ -61,6 +61,55 @@ A zero exit code is implied; a non-zero one, a still-running command, a lost
 terminal or a start failure is the last line of the output block.
 Multi-line messages run as a script.
 
+If a running command shows a recognizable input prompt or choice, Bang Shell
+opens that command's existing tab in the current thread's Terminal panel. Type
+your answer there. Bang Shell gives you up to `threadShellWaitSeconds` to answer
+and finish, while keeping at least the original `waitSeconds` deadline. For a
+silent read or an unrecognized prompt, the tab opens at `waitSeconds` if the
+command is still running, and the message is sent with the output captured so
+far. This fallback can also open a long-running command that needs no input.
+
+## Thread shell
+
+Each Run in terminal command normally gets a fresh terminal, so nothing carries
+over between commands. To run several steps in one shell, **Alt-click** a code
+block's Run button, or pick **Send menu → Run in thread shell** for the text in
+the composer. The command is pasted into one persistent interactive shell per
+thread, in a terminal tab named "Thread shell" in the thread's environment.
+Exported variables, the working folder and shell options carry over to the next
+command. The first use starts the shell; a small green dot on the Run button
+shows that the thread has a live one. Sending a command this way also opens the
+Thread shell tab in the terminal panel, so you can type into it right away.
+
+The message waits until the command finishes, up to `threadShellWaitSeconds`
+(default 600; `waitSeconds` does not apply here), so there is time to answer a
+prompt. Ctrl-C in the terminal ends the wait. After the cap the message is sent
+with the output so far and the command keeps running. Result delivery and
+`outputTailChars` work as for a normal run.
+
+To use credentials without showing them to the agent, ask the agent for blocks
+like these, then Alt-click each in turn:
+
+```sh
+read -r DB_USER
+read -rs DB_PASS
+export DB_USER DB_PASS
+```
+
+```sh
+PGPASSWORD="$DB_PASS" psql -h db.internal -U "$DB_USER" -c 'select 1'
+```
+
+`read` takes what you type in the Terminal panel. Type the value there, and the
+variable stays in that shell for later blocks. The command text and output go to
+the agent, so never put a secret in the command text; `read -s` keeps it off the
+screen too.
+
+While a command runs, a second Alt-click is refused with "The thread shell is
+still running a command; finish it or press Ctrl-C in the Terminal panel." If
+you close the Thread shell terminal, the next Alt-click starts a fresh shell, and
+the variables are gone.
+
 ## Install
 
 ```sh
@@ -72,20 +121,21 @@ bb plugin reload bang-shell   # settings are read at load
 
 ## Settings
 
-| Key                  | Default                                   | Range                                         | Meaning                                                                                                                                                                      |
-| -------------------- | ----------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `true`                                    |                                               | Run commands at all                                                                                                                                                          |
-| `requireRunAction`   | `true`                                    |                                               | Only run messages sent with the Run in terminal action (see Security)                                                                                                        |
-| `prefix`             | `!`                                       | 1–4 chars                                     | Command marker; no spaces, must not start with `` ` `` `/` `$` `@` `#`                                                                                                       |
-| `waitSeconds`        | `30`                                      | 0–3600                                        | Wait for output before sending; the command keeps running afterwards                                                                                                         |
-| `outputTailChars`    | `3000`                                    | 1–30000                                       | Last N output characters sent                                                                                                                                                |
-| `pollIntervalMs`     | `200`                                     | 50–10000                                      | Terminal poll interval while waiting                                                                                                                                         |
-| `terminalCols`       | `120`                                     | 20–500                                        | Terminal width                                                                                                                                                               |
-| `terminalRows`       | `32`                                      | 5–200                                         | Terminal height                                                                                                                                                              |
-| `titleMaxChars`      | `60`                                      | 1–200                                         | Terminal tab title length                                                                                                                                                    |
-| `runButtonLanguages` | `sh, bash, zsh, shell, console, terminal` | sh, bash, zsh, shell, console, terminal, fish | Code block languages with a Run button (comma or space separated); `none` turns the shell button off; unknown entries are dropped, an empty result falls back to the default |
-| `runPythonBlocks`    | `false`                                   |                                               | Also add the Run button to `python`, `py`, `python3` blocks                                                                                                                  |
-| `disablePager`       | `true`                                    |                                               | Run with `PAGER=cat GIT_PAGER=cat` so `git log` and `man` do not wait in a pager                                                                                             |
+| Key                      | Default                                   | Range                                         | Meaning                                                                                                                                                                      |
+| ------------------------ | ----------------------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                | `true`                                    |                                               | Run commands at all                                                                                                                                                          |
+| `requireRunAction`       | `true`                                    |                                               | Only run messages sent with the Run in terminal action (see Security)                                                                                                        |
+| `prefix`                 | `!`                                       | 1–4 chars                                     | Command marker; no spaces, must not start with `` ` `` `/` `$` `@` `#`                                                                                                       |
+| `waitSeconds`            | `30`                                      | 0–3600                                        | Wait for output, then show a still-running terminal and send output so far; recognized input prompts extend the wait using `threadShellWaitSeconds`                          |
+| `threadShellWaitSeconds` | `600`                                     | 0–3600                                        | Wait for thread shell completion, or this long after revealing a normal run's input prompt; then send output so far                                                          |
+| `outputTailChars`        | `3000`                                    | 1–30000                                       | Last N output characters sent                                                                                                                                                |
+| `pollIntervalMs`         | `200`                                     | 50–10000                                      | Terminal poll interval while waiting                                                                                                                                         |
+| `terminalCols`           | `120`                                     | 20–500                                        | Terminal width                                                                                                                                                               |
+| `terminalRows`           | `32`                                      | 5–200                                         | Terminal height                                                                                                                                                              |
+| `titleMaxChars`          | `60`                                      | 1–200                                         | Terminal tab title length                                                                                                                                                    |
+| `runButtonLanguages`     | `sh, bash, zsh, shell, console, terminal` | sh, bash, zsh, shell, console, terminal, fish | Code block languages with a Run button (comma or space separated); `none` turns the shell button off; unknown entries are dropped, an empty result falls back to the default |
+| `runPythonBlocks`        | `false`                                   |                                               | Also add the Run button to `python`, `py`, `python3` blocks                                                                                                                  |
+| `disablePager`           | `true`                                    |                                               | Run with `PAGER=cat GIT_PAGER=cat` so `git log` and `man` do not wait in a pager                                                                                             |
 
 Out-of-range numbers are clamped; non-numbers and invalid prefixes fall back to
 the default.
@@ -124,6 +174,16 @@ the default.
   Cancelling the held message, or sending it by hand, stops the plugin from
   touching it; the command itself keeps running in the thread's Terminal
   panel.
+- **The thread shell holds secrets in a long-running shell.** Variables you
+  enter there live as long as the shell does. Any client of the bb API on this
+  machine, including an agent whose shell reaches `BB_SERVER_URL`, can send
+  input to that terminal with `bb terminal send`; this is the limit described
+  under "What the marker does not stop" (code already running as you is not
+  stopped), and more serious because the shell is long-lived and holds your
+  credentials. A plain `read` (without `-s`) echoes what you type into the
+  terminal, and that echo is part of the output sent to the agent; use
+  `read -s` for anything secret. Never put a secret in the command text (it
+  goes to the agent), and close the Thread shell terminal when you are done.
 - **Output is untrusted.** The agent receives the output as part of your
   message, in a block labelled `output`. Output from untrusted sources (web
   pages, files) can contain text that looks like instructions; the bundled
@@ -144,6 +204,24 @@ the default.
   same command again with the action is refused for up to a minute.
 - If you group a held command with other queued messages, the group is sent
   when the command's message is.
+- Thread shell: zsh is the supported shell and is tested live. bash 4.4 or
+  newer is untested live, and a multi-line block in bash may be reported after
+  its first line only (the rest of its output missing). Other shells (fish, bash older
+  than 4.4) never report ready, and the message says
+  "[not run: the thread shell did not report ready (zsh and bash 4.4+ only); see the Thread shell tab]".
+- The thread shell's setup line is typed with a leading space, so it stays out
+  of shell history only with `HIST_IGNORE_SPACE` (zsh) or `HISTCONTROL=ignorespace`
+  (bash) set.
+- Typing in the Thread shell panel by hand is not detected: a half-typed line or
+  an unfinished block typed by hand can make the next paste part of it.
+- If more than about 64 KB of output with no end-of-command mark follows the
+  last command (for example a background job logging into the shell), the shell
+  reads busy and both Alt-click and Send menu → Run in thread shell are
+  refused. Once the output stops, press Enter (or Ctrl-C) in the terminal to
+  clear it. Run long-lived servers in a normal terminal.
+- The green dot means a terminal titled "Thread shell" is running in the
+  thread. An abandoned one (for example after an "unsupported shell" note) can
+  keep it lit.
 
 ## Development
 
