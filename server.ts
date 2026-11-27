@@ -7,17 +7,21 @@ import type {
   MessageDispatchHookContext,
   MessageDispatchHookDecision,
 } from "@get-bb/plugin-sdk";
-import { DEFAULT_RUN_BUTTON_LANGUAGES, normalizeCommand } from "./command-text.ts";
+import { DEFAULT_RUN_BUTTON_LANGUAGES, TERMINAL_REVEAL_CHANNEL, THREAD_SHELL_TITLE, normalizeCommand } from "./command-text.ts";
+import { JobScanner, lastMark, newNonce, newTerminalId, pasteInput, setupLine } from "./thread-shell.ts";
 
 type ThreadQueuedMessage = MessageDispatchHookContext["queuedMessages"][number];
 
 /** Key the composer action puts in `experimental_data`. */
 export const SUBMISSION_KEY = "bangShell";
 export const SUBMISSION_VERSION = 1;
+/** Same key: run in the thread's persistent shell instead of a fresh terminal. */
+export const SHELL_SUBMISSION_VERSION = 2;
 
 export const DEFAULTS = {
   prefix: "!",
   waitSeconds: 30,
+  threadShellWaitSeconds: 600,
   outputTailChars: 3000,
   pollIntervalMs: 200,
   terminalCols: 120,
@@ -27,6 +31,7 @@ export const DEFAULTS = {
 
 export const LIMITS = {
   waitSeconds: [0, 3600],
+  threadShellWaitSeconds: [0, 3600],
   outputTailChars: [1, 30_000],
   pollIntervalMs: [50, 10_000],
   terminalCols: [20, 500],
@@ -40,11 +45,20 @@ export const MAX_COMMAND_CHARS = 8000;
 const AUTH_PREFIX = "auth:";
 const JOB_PREFIX = "job:";
 const ROW_PREFIX = "row:";
+const SHELL_PREFIX = "shell:";
+/** Bounds for one thread-shell start, each in ms; none is a setting. */
+const PROMPT_WAIT_MS = 3000;
+const SETUP_WAIT_MS = 5000;
+const START_SEEN_WAIT_MS = 3000;
+/** Scrollback read to tell whether the shell is idle; more output than this since the last mark counts as busy. */
+const TAIL_BYTES = 65_536;
 const JOB_TTL_MS = 24 * 60 * 60 * 1000;
 /** An authorization no queued row picked up within this time was refused by core or another plugin. */
 const AUTHORIZED_TTL_MS = 60 * 1000;
 const MAX_REWRITE_ATTEMPTS = 5;
 const MAX_POLL_FAILURES = 3;
+/** A prompt must remain unfinished and quiet across polls before navigation. */
+const INPUT_QUIET_MS = 300;
 const REASK_MS = 2000;
 /** Core may stamp a row slightly before the hook that authorized it ran. */
 const ROW_CLOCK_SKEW_MS = 5000;
@@ -99,14 +113,26 @@ export function wholeNumber(value: unknown, fallback: number, min: number, max: 
   return Math.min(Math.max(n, min), max);
 }
 
+export type Target = "terminal" | "shell";
+
+/** Where this plugin's own submission asks to run, or null for anyone else's. */
+export function submissionTarget(
+  submission: { pluginId: string; data: unknown } | null | undefined,
+  pluginId: string,
+): Target | null {
+  if (!submission || submission.pluginId !== pluginId) return null;
+  const data = submission.data;
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+  const version = (data as Record<string, unknown>)[SUBMISSION_KEY];
+  if (version === SUBMISSION_VERSION) return "terminal";
+  return version === SHELL_SUBMISSION_VERSION ? "shell" : null;
+}
+
 export function isOwnSubmission(
   submission: { pluginId: string; data: unknown } | null | undefined,
   pluginId: string,
 ): boolean {
-  if (!submission || submission.pluginId !== pluginId) return false;
-  const data = submission.data;
-  if (typeof data !== "object" || data === null || Array.isArray(data)) return false;
-  return (data as Record<string, unknown>)[SUBMISSION_KEY] === SUBMISSION_VERSION;
+  return submissionTarget(submission, pluginId) !== null;
 }
 
 type TextBlock = { type: string; text?: string };
@@ -161,7 +187,11 @@ export type Outcome =
   | { kind: "running"; terminalTitle: string }
   | { kind: "disconnected" }
   | { kind: "failed" }
-  | { kind: "unknown" };
+  | { kind: "unknown" }
+  | { kind: "busy" }
+  | { kind: "unreachable" }
+  | { kind: "unsupported" }
+  | { kind: "uncertain" };
 
 /**
  * The message the agent receives: a `sh` block with the command, then an
@@ -185,6 +215,18 @@ export function formatShellMessage(command: string, output: string, outcome: Out
       break;
     case "unknown":
       note = "[plugin restarted while starting the command; it was not re-run and may not have run]";
+      break;
+    case "busy":
+      note = "[not run: thread shell busy]";
+      break;
+    case "unreachable":
+      note = "[not run: could not reach the thread shell; nothing was sent to it]";
+      break;
+    case "unsupported":
+      note = "[not run: the thread shell did not report ready (zsh and bash 4.4+ only); see the Thread shell tab]";
+      break;
+    case "uncertain":
+      note = "[could not confirm the command reached the thread shell; it was not re-run and may not have run]";
       break;
   }
   const shown = [output, note].filter(Boolean).join("\n");
@@ -214,6 +256,17 @@ interface Authorization {
   command: string;
   terminalTitle: string;
   createdAt: number;
+  /** Absent on records from before the thread shell: a fresh terminal. */
+  target?: Target;
+}
+
+/** One per thread; the terminal's marks, not this record, say whether it is idle. */
+interface ShellRecord {
+  terminalId: string;
+  nonce: string;
+  state: "starting" | "ready";
+  /** Output position of the last plugin write: the shell is busy until an end mark follows it. */
+  writeSeq?: number;
 }
 
 interface JobRecord extends Authorization {
@@ -222,6 +275,11 @@ interface JobRecord extends Authorization {
   terminalId: string | null;
   message: string | null;
   rewriteAttempts: number;
+  /** Thread shell: output position and marks nonce, saved before the command is written. */
+  sinceSeq?: number;
+  nonce?: string;
+  /** Normal run: reveal once and preserve its input grace period across reloads. */
+  revealedAt?: number;
 }
 
 const PROCEED: MessageDispatchHookDecision = { action: "proceed" };
@@ -251,8 +309,15 @@ export default async function plugin(bb: BbPluginApi) {
     waitSeconds: {
       type: "number",
       label: "Seconds to wait for output",
-      description: "0–3600. After this the message is sent with the output so far; the command keeps running in the thread's terminal.",
+      description: "0–3600. After this the message is sent with the output so far and the running terminal is shown. A recognized input prompt extends the wait using the thread shell timeout.",
       default: DEFAULTS.waitSeconds,
+    },
+    threadShellWaitSeconds: {
+      type: "number",
+      label: "Seconds to wait in the thread shell",
+      description:
+        "0–3600. Wait for a thread shell command to finish, or allow this much time after revealing a normal run's input prompt. Ctrl-C ends the command; after the timeout, send output so far.",
+      default: DEFAULTS.threadShellWaitSeconds,
     },
     outputTailChars: {
       type: "number",
@@ -304,6 +369,7 @@ export default async function plugin(bb: BbPluginApi) {
     requireRunAction: raw.requireRunAction !== false,
     prefix: prefix ?? DEFAULTS.prefix,
     waitMs: num("waitSeconds") * 1000,
+    threadShellWaitMs: num("threadShellWaitSeconds") * 1000,
     outputTailChars: num("outputTailChars"),
     pollIntervalMs: num("pollIntervalMs"),
     terminalCols: num("terminalCols"),
@@ -364,14 +430,16 @@ export default async function plugin(bb: BbPluginApi) {
     if (gone.has(job.id)) throw new Error("message left the queue");
   }
 
+  /** Only the load that bound the job may start it; after a reload whether it started is unknown. */
+  function claimStart(job: JobRecord): boolean {
+    if (startable.delete(job.id)) return true;
+    job.state = "done";
+    job.message = formatShellMessage(job.command, "", { kind: "unknown" });
+    return false;
+  }
+
   async function startCommand(job: JobRecord): Promise<void> {
-    if (!startable.delete(job.id)) {
-      // Bound by an earlier load that stopped before recording the terminal:
-      // whether it started is unknown, so it is never started again.
-      job.state = "done";
-      job.message = formatShellMessage(job.command, "", { kind: "unknown" });
-      return;
-    }
+    if (!claimStart(job)) return;
     try {
       const terminal = await bb.sdk.terminals.create({
         scope: { kind: "thread", threadId: job.threadId },
@@ -396,13 +464,23 @@ export default async function plugin(bb: BbPluginApi) {
     let buffer = "";
     let sinceSeq: number | undefined;
     let failures = 0;
-    const deadline = job.createdAt + config.waitMs;
+    let deadline = Math.max(job.createdAt + config.waitMs, job.revealedAt ? job.revealedAt + config.threadShellWaitMs : 0);
+    let quietSince = Date.now();
+    const publishReveal = () => {
+      checkAlive(job);
+      try {
+        bb.realtime.publish(TERMINAL_REVEAL_CHANNEL, { threadId: job.threadId, terminalId });
+      } catch { /* Navigation is best effort; output delivery must continue. */ }
+    };
     for (;;) {
       checkAlive(job);
       let outcome: Outcome | null = null;
+      let running = false;
       try {
         const out = await bb.sdk.terminals.output({ terminalId, sinceSeq });
         failures = 0;
+        if (out.chunks.some((chunk) => chunk.dataBase64.length > 0)) quietSince = Date.now();
+        running = out.status === "running";
         for (const chunk of out.chunks) {
           buffer = appendBounded(
             buffer,
@@ -417,13 +495,270 @@ export default async function plugin(bb: BbPluginApi) {
         failures += 1;
         if (failures >= MAX_POLL_FAILURES) outcome = { kind: "disconnected" };
       }
-      if (!outcome && Date.now() >= deadline) outcome = { kind: "running", terminalTitle: job.terminalTitle };
+      checkAlive(job);
+      if (running && !job.revealedAt && Date.now() - quietSince >= INPUT_QUIET_MS) {
+        const line = buffer.replace(ANSI_PATTERN, "").split(/\r\n?|\n/).at(-1) ?? "";
+        if (/(?:\[[yn]\/[yn]\]|\([yn]\/[yn]\)|[?:])\s*$/i.test(line)) {
+          job.revealedAt = Date.now();
+          await saveJob(job);
+          publishReveal();
+          deadline = Math.max(deadline, job.revealedAt + config.threadShellWaitMs);
+        }
+      }
+      if (!outcome && Date.now() >= deadline) {
+        outcome = { kind: "running", terminalTitle: job.terminalTitle };
+      }
       if (outcome) {
         job.state = "done";
         job.message = formatShellMessage(job.command, tail(cleanTerminalOutput(buffer), config.outputTailChars), outcome);
         await saveJob(job);
+        if (outcome.kind === "running" && running && !job.revealedAt) publishReveal();
         if (outcome.kind === "exited") {
           await bb.sdk.terminals.close({ terminalId, mode: "force" }).catch(() => {});
+        }
+        return;
+      }
+      await sleep(config.pollIntervalMs);
+    }
+  }
+
+  // ---- thread shell: one interactive terminal per thread, state read from its marks
+
+  const shellKey = (threadId: string) => `${SHELL_PREFIX}${threadId}`;
+  const shellChain = new Map<string, Promise<unknown>>();
+  /** Threads whose serialized write section is running. */
+  const shellHeld = new Set<string>();
+
+  /** One write section per thread at a time; the hook reads `shellHeld` without taking part. */
+  function withShellLock<T>(threadId: string, fn: () => Promise<T>): Promise<T> {
+    const run = (shellChain.get(threadId) ?? Promise.resolve()).then(async () => {
+      shellHeld.add(threadId);
+      try {
+        return await fn();
+      } finally {
+        shellHeld.delete(threadId);
+      }
+    });
+    shellChain.set(threadId, run.catch(() => {}));
+    return run;
+  }
+
+  async function until(check: () => Promise<boolean>, ms: number): Promise<boolean> {
+    const end = Date.now() + ms;
+    for (;;) {
+      if (await check().catch(() => false)) return true;
+      if (Date.now() >= end || disposed) return false;
+      await sleep(config.pollIntervalMs);
+    }
+  }
+
+  async function readOutput(terminalId: string, args: { sinceSeq?: number; tailBytes?: number }) {
+    const out = await bb.sdk.terminals.output({ terminalId, ...args });
+    const decoder = new TextDecoder();
+    const parts = out.chunks.map((c) => ({ seq: c.seq, text: decoder.decode(Buffer.from(c.dataBase64, "base64"), { stream: true }) }));
+    return {
+      text: parts.map((p) => p.text).join(""),
+      parts,
+      nextSeq: out.nextSeq,
+      alive: out.status === "running" || out.status === "starting",
+    };
+  }
+
+  /** bb answers an unknown terminal with HTTP 404 and code `terminal_not_found`. */
+  function isNotFound(error: unknown): boolean {
+    const e = error as { code?: unknown; status?: unknown; statusCode?: unknown; message?: unknown } | null;
+    return (
+      e?.code === "terminal_not_found" ||
+      e?.status === 404 ||
+      e?.statusCode === 404 ||
+      (typeof e?.message === "string" && /terminal_not_found|\bHTTP 404\b/.test(e.message))
+    );
+  }
+
+  /** An output error alone proves nothing about the terminal: only a reported exit or "not found" counts as gone. */
+  async function terminalState(terminalId: string): Promise<"alive" | "gone" | "unknown"> {
+    try {
+      return (await readOutput(terminalId, { tailBytes: 1 })).alive ? "alive" : "gone";
+    } catch {
+      // Ask the terminal itself below.
+    }
+    try {
+      const { status } = await bb.sdk.terminals.get({ terminalId });
+      return status === "exited" || status === "disconnected" ? "gone" : "unknown";
+    } catch (error) {
+      return isNotFound(error) ? "gone" : "unknown";
+    }
+  }
+
+  /**
+   * The thread's shell record when its terminal is alive and set up, undefined
+   * when it is gone (the record is dropped), null when it cannot be reached
+   * right now (the record stays, nothing is recreated).
+   */
+  async function liveShell(threadId: string): Promise<ShellRecord | undefined | null> {
+    const record = await kv.get<ShellRecord>(shellKey(threadId));
+    if (!record) return undefined;
+    if (record.state === "ready") {
+      const state = await terminalState(record.terminalId);
+      if (state === "alive") return record;
+      if (state === "unknown") return null;
+    }
+    // Closed or exited, or a setup that never finished (a reload mid-setup): start over, leaving the terminal to the user.
+    await kv.delete(shellKey(threadId));
+    return undefined;
+  }
+
+  /** A new thread shell with the mark hooks installed, or null when it never reported ready. */
+  async function createShell(threadId: string): Promise<ShellRecord | null> {
+    const record: ShellRecord = { terminalId: newTerminalId(), nonce: newNonce(), state: "starting" };
+    // Saved first so a reload between create and the end of setup cannot lose track of the terminal.
+    await kv.set(shellKey(threadId), record);
+    try {
+      await bb.sdk.terminals.create({
+        id: record.terminalId,
+        scope: { kind: "thread", threadId },
+        cols: config.terminalCols,
+        rows: config.terminalRows,
+        title: THREAD_SHELL_TITLE,
+        start: { mode: "shell" },
+      });
+      // Typing before the first prompt can be lost to the shell's own startup.
+      await until(async () => (await readOutput(record.terminalId, { tailBytes: 1 })).nextSeq > 0, PROMPT_WAIT_MS);
+      const line = setupLine(record.nonce, config.disablePager);
+      await bb.sdk.terminals.input({ terminalId: record.terminalId, dataBase64: Buffer.from(line).toString("base64") });
+    } catch (error) {
+      await kv.delete(shellKey(threadId));
+      throw error;
+    }
+    const ready = await until(
+      async () => lastMark((await readOutput(record.terminalId, { tailBytes: TAIL_BYTES })).text, record.nonce)?.kind === "E",
+      SETUP_WAIT_MS,
+    );
+    if (!ready) {
+      await kv.delete(shellKey(threadId));
+      return null;
+    }
+    record.state = "ready";
+    await kv.set(shellKey(threadId), record);
+    return record;
+  }
+
+  /**
+   * Idle means the last mark in the tail is an end mark that follows the
+   * plugin's last write: an unterminated heredoc or quote leaves a continuation
+   * prompt with no mark at all, so a tail without marks after the write is busy.
+   */
+  async function readIdle(record: ShellRecord) {
+    const out = await readOutput(record.terminalId, { tailBytes: TAIL_BYTES });
+    const afterWrite = out.parts.filter((part) => part.seq >= (record.writeSeq ?? 0));
+    const mark = lastMark(afterWrite.map((part) => part.text).join(""), record.nonce);
+    return { idle: mark?.kind === "E", alive: out.alive, nextSeq: out.nextSeq };
+  }
+
+  /** True while a write section runs or the shell is not idle. */
+  async function shellBusy(threadId: string): Promise<boolean> {
+    if (shellHeld.has(threadId)) return true;
+    const record = await kv.get<ShellRecord>(shellKey(threadId));
+    if (record?.state !== "ready") return false;
+    try {
+      const state = await readIdle(record);
+      return state.alive && !state.idle;
+    } catch {
+      return false;
+    }
+  }
+
+  async function startShellCommand(job: JobRecord): Promise<void> {
+    if (!claimStart(job)) return;
+    const end = (outcome: Outcome) => {
+      job.state = "done";
+      job.message = formatShellMessage(job.command, "", outcome);
+    };
+    await withShellLock(job.threadId, async () => {
+      checkAlive(job);
+      let shell: ShellRecord | null | undefined;
+      try {
+        const live = await liveShell(job.threadId);
+        if (live === null) return end({ kind: "unreachable" });
+        shell = live ?? (await createShell(job.threadId));
+        if (!shell) return end({ kind: "unsupported" });
+      } catch (error) {
+        bb.log.warn(`thread shell in ${job.threadId} failed to start (${errorKind(error)})`);
+        return end({ kind: "failed" });
+      }
+      let state: Awaited<ReturnType<typeof readIdle>>;
+      try {
+        state = await readIdle(shell);
+      } catch {
+        return end({ kind: "unreachable" });
+      }
+      // Re-checked inside the section: the shell may have become busy after the hook looked.
+      if (!state.idle) return end({ kind: "busy" });
+      job.terminalId = shell.terminalId;
+      job.terminalTitle = THREAD_SHELL_TITLE;
+      job.nonce = shell.nonce;
+      job.sinceSeq = state.nextSeq;
+      job.state = "running";
+      shell.writeSeq = state.nextSeq;
+      // From here the command counts as written: it is never written again, whatever happens next.
+      await kv.set(shellKey(job.threadId), shell);
+      await saveJob(job);
+      try {
+        await bb.sdk.terminals.input({ terminalId: shell.terminalId, dataBase64: Buffer.from(pasteInput(job.command)).toString("base64") });
+      } catch (error) {
+        bb.log.warn(`writing a command to the thread shell in ${job.threadId} failed (${errorKind(error)})`);
+        return end({ kind: "uncertain" });
+      }
+      // Hold the section until the shell reports the start, so a quick second click finds it busy.
+      const scan = new JobScanner(shell.nonce, 1);
+      let seq = state.nextSeq;
+      await until(async () => {
+        const out = await readOutput(shell.terminalId, { sinceSeq: seq });
+        seq = out.nextSeq;
+        scan.push(out.text);
+        return scan.started || scan.done || !out.alive;
+      }, START_SEEN_WAIT_MS);
+    });
+  }
+
+  async function pollShellCommand(job: JobRecord): Promise<void> {
+    const terminalId = job.terminalId as string;
+    const scan = new JobScanner(job.nonce as string, rawBufferChars);
+    let sinceSeq = job.sinceSeq;
+    let failures = 0;
+    let terminalGone = false;
+    // Its own cap, not `waitMs`: the user may still be typing into a `read`.
+    const deadline = job.createdAt + config.threadShellWaitMs;
+    for (;;) {
+      checkAlive(job);
+      let outcome: Outcome | null = null;
+      try {
+        const out = await readOutput(terminalId, { sinceSeq });
+        failures = 0;
+        scan.push(out.text);
+        sinceSeq = out.nextSeq;
+        if (scan.done) outcome = { kind: "exited", exitCode: scan.exitCode };
+        else if (!out.alive) {
+          outcome = { kind: "disconnected" };
+          terminalGone = true;
+        }
+      } catch {
+        failures += 1;
+        if (failures >= MAX_POLL_FAILURES) {
+          outcome = { kind: "disconnected" };
+          terminalGone = (await terminalState(terminalId)) === "gone";
+        }
+      }
+      if (!outcome && Date.now() >= deadline) {
+        outcome = scan.started ? { kind: "running", terminalTitle: job.terminalTitle } : { kind: "uncertain" };
+      }
+      if (outcome) {
+        job.state = "done";
+        job.message = formatShellMessage(job.command, tail(cleanTerminalOutput(scan.output), config.outputTailChars), outcome);
+        await saveJob(job);
+        if (terminalGone) {
+          const record = await kv.get<ShellRecord>(shellKey(job.threadId));
+          if (record?.terminalId === terminalId) await kv.delete(shellKey(job.threadId));
         }
         return;
       }
@@ -459,11 +794,12 @@ export default async function plugin(bb: BbPluginApi) {
   async function work(id: string): Promise<void> {
     const job = await loadJob(id);
     if (!job || gone.has(id)) return;
+    const shell = job.target === "shell";
     if (job.state === "starting") {
-      await startCommand(job);
+      await (shell ? startShellCommand(job) : startCommand(job));
       await saveJob(job);
     }
-    if (job.state === "running") await pollCommand(job);
+    if (job.state === "running") await (shell ? pollShellCommand(job) : pollCommand(job));
     checkAlive(job);
     if (job.state === "done" && job.rewriteAttempts < MAX_REWRITE_ATTEMPTS) await rewriteMessage(job);
   }
@@ -573,7 +909,8 @@ export default async function plugin(bb: BbPluginApi) {
       return PROCEED;
     }
 
-    const own = isOwnSubmission(ctx.experimental_submission, bb.pluginId);
+    const target = submissionTarget(ctx.experimental_submission, bb.pluginId);
+    const own = target !== null;
     if (!own && ctx.queuedMessages.length === 0 && (await kv.get(key))) {
       // Same text sent without the action (plain Enter, an agent): a leftover
       // authorization must not bind to its row.
@@ -611,14 +948,21 @@ export default async function plugin(bb: BbPluginApi) {
     if (await loadAuth(key)) {
       return { action: "reject", message: "The same command was just sent in this thread; wait a moment." };
     }
+    if (target === "shell" && (await shellBusy(ctx.thread.id))) {
+      return {
+        action: "reject",
+        message: "The thread shell is still running a command; finish it or press Ctrl-C in the Terminal panel.",
+      };
+    }
 
     const auth: Authorization = {
       id: randomUUID(),
       threadId: ctx.thread.id,
       textKey: key,
       command,
-      terminalTitle: command.replace(/\s+/g, " ").slice(0, config.titleMaxChars),
+      terminalTitle: target === "shell" ? THREAD_SHELL_TITLE : command.replace(/\s+/g, " ").slice(0, config.titleMaxChars),
       createdAt: Date.now(),
+      target: target ?? "terminal",
     };
     await kv.set(key, auth);
     // Nothing runs yet: the command starts when core queues the held row

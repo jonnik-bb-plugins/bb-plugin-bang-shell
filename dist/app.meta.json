@@ -1,0 +1,17 @@
+{
+  "sdkMajor": 0,
+  "sdkVersion": "0.6.157",
+  "artifactFormatVersion": 1,
+  "pluginId": "bang-shell",
+  "pluginVersion": "0.5.0",
+  "builtWith": {
+    "bbVersion": "0.50.1",
+    "pluginSdkVersion": "0.6.157"
+  },
+  "runtimeSlots": [
+    "jsxRuntime",
+    "pluginSdkApp",
+    "react",
+    "sonner"
+  ]
+}
